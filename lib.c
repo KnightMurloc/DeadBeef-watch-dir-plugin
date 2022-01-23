@@ -22,10 +22,11 @@
 #define USE_FDS 15
 #endif
 
-#define MAX_EVENTS 1024 /*Максимальное кличество событий для обработки за один раз*/
-#define LEN_NAME 256 /*Будем считать, что длина имени файла не превышает 16 символов*/
-#define EVENT_SIZE  ( sizeof (struct inotify_event) ) /*размер структуры события*/
-#define BUF_LEN     ( MAX_EVENTS * ( EVENT_SIZE + LEN_NAME )) /*буфер для хранения данных о событиях*/
+//need for inotify
+#define MAX_EVENTS 1024 //The maximum number of events to process at one time.
+#define LEN_NAME 256 //max length of file name
+#define EVENT_SIZE  ( sizeof (struct inotify_event) ) //the size of the event structure
+#define BUF_LEN     ( MAX_EVENTS * ( EVENT_SIZE + LEN_NAME )) //event buffer
 
 
 static DB_functions_t *deadbeef;
@@ -96,7 +97,9 @@ static ddb_playlist_t* find_playlist(const char* find_title){
 }
 
 void free_wd(gpointer data){
+#ifdef DEGUG
     printf("wd free\n");
+#endif
     inotify_rm_watch(in_fd,  *((int*) data));
     free(data);
 }
@@ -105,11 +108,13 @@ static int start(){
     //get path to database file
     const char* db_dir = deadbeef->get_system_dir(DDB_SYS_DIR_CONFIG);
     char* db_file = full_path(db_dir,"data.db");
-    printf("%s\n",db_file);
-
+#ifdef DEGUG
+    printf("data_base file: %s\n",db_file);
+#endif
     int init_needed = access(db_file,R_OK);
+#ifdef DEGUG
     printf("init_needed: %d\n", init_needed);
-
+#endif
     int rc = sqlite3_open(db_file, &db);
 
     if (rc != SQLITE_OK) {
@@ -126,15 +131,15 @@ static int start(){
         sqlite3_exec(db,"CREATE INDEX \"path_index\" ON \"files\" (\n"
                         "\t\"path\"\n"
                         ");", NULL,NULL,&err_msg);
-    }else{
+    }
+#ifdef DEGUG
+    else{
         printf("work with exist db\n");
     }
-
+#endif
     sqlite3_exec(db, "CREATE temporary TABLE \"files_tmp\" (\n"
                      "\t\"path\"\tTEXT NOT NULL CHECK(path <> \"\")\n"
                      ");",NULL,NULL, &err_msg);
-
-    printf("init wd end\n");
 
     in_fd = inotify_init();
     if ( in_fd < 0 ) {
@@ -155,7 +160,6 @@ static int add_callback(void *pl_raw, int argc, char **argv, char **azColName){
     if(argc == 1){
         const char* sql_form = "insert into files(path) values('%s');";
         const char* path = argv[0];
-        printf("%s\n",path);
         char* sql = malloc(strlen(sql_form) + strlen(path) + 2);
         sprintf(sql,sql_form,path);
 
@@ -167,7 +171,6 @@ static int add_callback(void *pl_raw, int argc, char **argv, char **azColName){
 
 
         deadbeef->plt_add_file2(1,pl,path,NULL,NULL);
-//        deadbeef->plt_insert_file2(1,pl,deadbeef->plt_get_last(pl,0),path,NULL,NULL,NULL);
 
         free(sql);
     }
@@ -176,15 +179,11 @@ static int add_callback(void *pl_raw, int argc, char **argv, char **azColName){
 
 static ddb_playItem_t* find_by_path(ddb_playlist_t* pl, const char* path){
     int count = deadbeef->plt_get_item_count(pl,0);
-    printf("count: %d\n",count);
     ddb_playItem_t* current = deadbeef->plt_get_first(pl,0);
 
     deadbeef->pl_lock();
     while (current){
-//        printf("test\n");
-
         const char* path_ = deadbeef->pl_find_meta(current,":URI");
-//        printf("path_: %s : %s\n", path_, path);
         if(strcmp(path, path_) == 0){
             deadbeef->pl_item_unref(current);
             deadbeef->pl_unlock();
@@ -203,7 +202,7 @@ static int remove_callback(void *pl, int argc, char **argv, char **azColName){
     if(argc == 1){
         const char* sql_form = "delete from files where path = '%s';";
         const char* path = argv[0];
-        printf("%s\n", path);
+
         char* sql = malloc(strlen(sql_form) + strlen(path) + 2);
         sprintf(sql,sql_form,path);
 
@@ -212,10 +211,8 @@ static int remove_callback(void *pl, int argc, char **argv, char **azColName){
         if (rc != SQLITE_OK ) {
             fprintf(stderr, "SQL error: %s\n", err_msg);
         }
-        printf("remove from db!\n");
 
         ddb_playItem_t* playItem = find_by_path(pl,path);
-        printf("finded: %p\n", playItem);
         if(playItem == NULL){
             free(sql);
             return 0;
@@ -225,8 +222,7 @@ static int remove_callback(void *pl, int argc, char **argv, char **azColName){
         deadbeef->pl_item_ref(playItem);
 
         deadbeef->plt_remove_item(pl,playItem);
-        printf("removed\n");
-//
+
         deadbeef->pl_item_unref(playItem);
         deadbeef->pl_unlock();
 
@@ -242,13 +238,14 @@ void add_dir(struct inotify_event *event){
     char* path = malloc(strlen(parent_name) + 1 + strlen(event->name) + 2);
 
     sprintf(path,"%s/%s",parent_name,event->name);
-//    printf("test %s\n", path);
+
     int* wd = malloc(sizeof(int));
 
     *wd = inotify_add_watch(in_fd, path, notify_mask);
     if (*wd == -1)
     {
         printf("Couldn't add watch to %s\n", path);
+        return;
     }
     g_hash_table_insert(wd_table,wd,path);
 }
@@ -258,6 +255,7 @@ void add_file(struct inotify_event *event, ddb_playlist_t* pl){
 
     char* file = basename(basename_tmp);
 
+    //check file format
     if(strstr(ext_list, get_filename_ext(file)) == NULL){
         free(basename_tmp);
         return;
@@ -268,38 +266,6 @@ void add_file(struct inotify_event *event, ddb_playlist_t* pl){
     char* path = malloc(strlen(parent_name) + 1 + strlen(event->name) + 2);
     sprintf(path,"%s/%s",parent_name,event->name);
     g_hash_table_insert(wait_table,path,NULL);
-//    char* basename_tmp = strdup(event->name);
-//
-//    char* file = basename(basename_tmp);
-//
-//    if(strstr(ext_list, get_filename_ext(file)) == NULL){
-//        free(basename_tmp);
-//        return;
-//    }
-//    free(basename_tmp);
-//
-//    const char* sql_form = "insert into files(path) values('%s');";
-//    const char* parent_name = g_hash_table_lookup(wd_table,&event->wd);
-//
-//    char* path = malloc(strlen(parent_name) + 1 + strlen(event->name) + 2);
-//
-//    sprintf(path,"%s/%s",parent_name,event->name);
-//
-//    char* sql = malloc(strlen(sql_form) + strlen(path) + 2);
-//    sprintf(sql,sql_form,path);
-//    int rc = sqlite3_exec(db, sql, 0, 0, &err_msg);
-//
-//    if (rc != SQLITE_OK ) {
-//        fprintf(stderr, "SQL error: %s\n", err_msg);
-//    }
-//
-//    deadbeef->pl_lock();
-//    deadbeef->plt_add_file2(1,pl,path,NULL,NULL);
-////    deadbeef->plt_insert_file2(1,pl,deadbeef->plt_get_last(pl,0),path,NULL,NULL,NULL);
-//    deadbeef->pl_unlock();
-//
-//    free(sql);
-//    free(path);
 }
 
 void file_close(struct inotify_event *event, ddb_playlist_t* pl){
@@ -307,11 +273,11 @@ void file_close(struct inotify_event *event, ddb_playlist_t* pl){
 
     char* path = malloc(strlen(parent_name) + 1 + strlen(event->name) + 2);
     sprintf(path,"%s/%s",parent_name,event->name);
-    printf("%s\n",path);
     if(g_hash_table_contains(wait_table,path)){
-        printf("file write end\n");
+#ifdef DEBUG
+        printf("file write end %s\n", path);
+#endif
         g_hash_table_remove(wait_table,path);
-        printf("removed from table\n");
 
         const char* sql_form = "insert into files(path) values('%s');";
 
@@ -325,8 +291,7 @@ void file_close(struct inotify_event *event, ddb_playlist_t* pl){
         }
 
         deadbeef->pl_lock();
-        deadbeef->plt_add_file2(1,pl,path,NULL,NULL);
-//    deadbeef->plt_insert_file2(1,pl,deadbeef->plt_get_last(pl,0),path,NULL,NULL,NULL);
+        deadbeef->plt_add_file2(1,pl,path,NULL,NULL); //TODO check if file add failed and not add to DB
         deadbeef->pl_unlock();
 
         free(path);
@@ -336,13 +301,12 @@ void file_close(struct inotify_event *event, ddb_playlist_t* pl){
 
 void remove_file(struct inotify_event *event, ddb_playlist_t* pl){
     const char* sql_form = "delete from files where path = '%s';";
-//    const char* path = event->name;
+
     const char* parent_name = g_hash_table_lookup(wd_table,&event->wd);
     char* path = malloc(strlen(parent_name) + 1 + strlen(event->name) + 2);
 
     sprintf(path,"%s/%s",parent_name,event->name);
 
-    printf("%s\n", path);
     char* sql = malloc(strlen(sql_form) + strlen(path) + 2);
     sprintf(sql,sql_form,path);
 
@@ -353,7 +317,7 @@ void remove_file(struct inotify_event *event, ddb_playlist_t* pl){
     }
 
     ddb_playItem_t* playItem = find_by_path(pl,path);
-    printf("finded: %p\n", playItem);
+    printf("found: %p\n", playItem);
     if(playItem == NULL){
         free(sql);
         free(path);
@@ -364,8 +328,7 @@ void remove_file(struct inotify_event *event, ddb_playlist_t* pl){
     deadbeef->pl_item_ref(playItem);
 
     deadbeef->plt_remove_item(pl,playItem);
-    printf("removed\n");
-//
+
     deadbeef->pl_item_unref(playItem);
     deadbeef->pl_unlock();
 
@@ -385,7 +348,6 @@ static void watch_thread(ddb_playlist_t* pl){
 
     while(!shutdown)
     {
-        printf("test\n");
         i = 0;
 
         int ret = poll( fds, 1, 10000);
@@ -412,51 +374,63 @@ static void watch_thread(ddb_playlist_t* pl){
 
                 if (event->mask & IN_CREATE) {
                     if (event->mask & IN_ISDIR) {
+#ifdef DEBUG
                         printf("The directory %s was Created.\n", event->name);
+#endif
                         add_dir(event);
                     }else{
+#ifdef DEBUG
                         printf("The file %s was Created with WD %d - cookie %d\n", event->name, event->wd,
                                event->cookie);
+#endif
                         add_file(event,pl);
                     }
                 }else if ( event->mask & IN_DELETE){
                     if (event->mask & IN_ISDIR) {
                         //TODO удалять wd у далёной дериктории
+#ifdef DEBUG
                         printf("STAB The directory %s was deleted.\n", event->name);
+#endif
                     }else {
+#ifdef DEBUG
                         printf("The file %s was deleted with WD %d - cookie %d\n", event->name, event->wd,
                                event->cookie);
+#endif
                         remove_file(event,pl);
                     }
                 }else if (event->mask & IN_MOVED_FROM){
-//                    printf("IN_MOVED_FROM %s\n", event->name);
                     if (event->mask & IN_ISDIR) {
                         //TODO удалять wd у далёной дериктории
+#ifdef DEBUG
                         printf("STAB The directory %s was deleted.\n", event->name);
+#endif
                     }else {
+#ifdef DEBUG
                         printf("The file %s was deleted with WD %d - cookie %d\n", event->name, event->wd,
                                event->cookie);
+#endif
                         remove_file(event,pl);
                     }
                 }else if(event->mask & IN_MOVED_TO){
-                    printf("IN_MOVED_TO %s\n", event->name);
                     if (event->mask & IN_ISDIR) {
-                        printf("The directory %s was Created.\n", event->name);
+#ifdef DEBUG
+                        printf("The directory %s was Moved.\n", event->name);
+#endif
                         add_dir(event);
-                    }else {
+                    }else{
+#ifdef DEBUG
                         printf("The file %s was Created with WD %d - cookie %d\n", event->name, event->wd,
                                event->cookie);
+#endif
                         add_file(event,pl);
                     }
                 }else if(event->mask & IN_CLOSE){
                     if(!(event->mask & IN_ISDIR)){
                         file_close(event,pl);
                     }
-
                 }
 
                 i += EVENT_SIZE + event->len;
-
             }
         }
     }
@@ -468,18 +442,17 @@ static int connect(){
         printf("play list not found\n");
         return 0;
     }
+#ifdef DEBUG
     printf("play list found\n");
+#endif
 
     deadbeef->plt_add_files_begin(pl,1);
 
     //find new files
-    printf("удалёные файлы\n");
     sqlite3_exec(db,"SELECT path FROM files\n"
                     "    EXCEPT\n"
                     "    SELECT path FROM files_tmp;",remove_callback,pl,&err_msg);
-    printf("\n");
     //find deleted files
-    printf("новые файлы\n");
     sqlite3_exec(db,"SELECT path FROM files_tmp\n"
                     "    EXCEPT\n"
                     "    SELECT path FROM files;",add_callback,pl,&err_msg);
@@ -511,7 +484,6 @@ static DB_misc_t plugin = {
                 .descr = "auto refresh play list",
                 .copyright = "Murloc Knight",
                 .website = "https://github.com/KnightMurloc/DeadBeef-X11-Overlay-Plugin-",
-
                 .command = NULL,
                 .start = start,
                 .stop = stop,
