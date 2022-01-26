@@ -44,6 +44,36 @@ static char* root = NULL;
 static const char* ext_list = "mp3,flac,ape,m4a,wav,cue";
 static char* pl_name = NULL;
 
+static char* escaping(const char* str){
+
+    int str_len = strlen(str);
+
+    int quotes = 0;
+    for (int i = 0; i < str_len; ++i) {
+        if(str[i] == '\''){
+            quotes++;
+        }
+    }
+
+    if(str_len == 0){
+        return NULL;
+    }
+
+    char* new_str = malloc(str_len + quotes + 1);
+    int j = 0;
+    for (int i = 0; i < str_len; ++i) {
+        if(str[i] == '\''){
+            new_str[j++] = '\'';
+            new_str[j++] = '\'';
+        }else{
+            new_str[j++] = str[i];
+        }
+    }
+    new_str[j] = '\0';
+
+    return new_str;
+}
+
 int file_callback(const char *filepath, const struct stat *info,
                   int typeflag, struct FTW *pathinfo){
     if(typeflag == FTW_D){
@@ -63,15 +93,31 @@ int file_callback(const char *filepath, const struct stat *info,
             return 0;
         }
 
+        char* file_path_esq = escaping(filepath);
+
         const char* sql_form = "insert into files_tmp(path) values('%s');";
-        char* sql = malloc(strlen(sql_form) + strlen(filepath) + 2);
-        sprintf(sql,sql_form,filepath);
+        char *sql;
+        if(file_path_esq == NULL){
+            sql = malloc(strlen(sql_form) + strlen(filepath) + 2);
+            sprintf(sql,sql_form,filepath);
+        }else{
+            sql = malloc(strlen(sql_form) + strlen(file_path_esq) + 2);
+
+            sprintf(sql,sql_form,file_path_esq);
+            free(file_path_esq);
+        }
+
+
+        sqlite3_str* test;
+
 
         int rc = sqlite3_exec(db, sql, 0, 0, &err_msg);
 
         if (rc != SQLITE_OK ) {
             fprintf(stderr, "SQL error2: %s\n", err_msg);
         }
+
+        printf("%s\n", filepath);
 
         free(sql);
         free(dir_name_tmp);
@@ -225,8 +271,18 @@ static int add_callback(void *pl_raw, int argc, char **argv, char **azColName){
     if(argc == 1){
         const char* sql_form = "insert into files(path) values('%s');";
         const char* path = argv[0];
-        char* sql = malloc(strlen(sql_form) + strlen(path) + 2);
-        sprintf(sql,sql_form,path);
+        char* path_esq = escaping(path);
+
+        char *sql;
+
+        if(path_esq == NULL){
+            sql = malloc(strlen(sql_form) + strlen(path) + 2);
+            sprintf(sql,sql_form,path);
+        }else {
+            sql = malloc(strlen(sql_form) + strlen(path_esq) + 2);
+            sprintf(sql, sql_form, path_esq);
+            free(path_esq);
+        }
 
         int rc = sqlite3_exec(db, sql, 0, 0, &err_msg);
 
@@ -235,6 +291,7 @@ static int add_callback(void *pl_raw, int argc, char **argv, char **azColName){
         }
 
 
+        printf("%s\n", path);
         deadbeef->plt_add_file2(1,pl,path,NULL,NULL);
 
         free(sql);
@@ -344,10 +401,23 @@ void file_close(struct inotify_event *event, ddb_playlist_t* pl){
 #endif
         g_hash_table_remove(wait_table,path);
 
-        const char* sql_form = "insert into files(path) values('%s');";
+        const char* sql_form = "insert into files(path) values('%s'));";
 
-        char* sql = malloc(strlen(sql_form) + strlen(path) + 2);
-        sprintf(sql,sql_form,path);
+        char* path_esq = escaping(path);
+
+        char *sql;
+
+        if(path_esq == NULL){
+            sql = malloc(strlen(sql_form) + strlen(path) + 2);
+            sprintf(sql,sql_form,path);
+        }else{
+            sql = malloc(strlen(sql_form) + strlen(path_esq) + 2);
+            sprintf(sql,sql_form,path_esq);
+
+            free(path_esq);
+        }
+
+
 
         int rc = sqlite3_exec(db, sql, 0, 0, &err_msg);
 
