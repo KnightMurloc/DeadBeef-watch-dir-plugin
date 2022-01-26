@@ -16,6 +16,7 @@
 #include <ftw.h>
 #include <libgen.h>
 #include <poll.h>
+#include "cJSON/cJSON.h"
 
 //need for nftw
 #ifndef USE_FDS
@@ -33,14 +34,15 @@ static DB_functions_t *deadbeef;
 static sqlite3* db;
 static char *err_msg = 0;
 static int in_fd; //inotify fd
-static GHashTable* wd_table;
-static GHashTable* wait_table;
-static intptr_t watch_thread_ptr;
+static GHashTable* wd_table = NULL;
+static GHashTable* wait_table = NULL;
+static intptr_t watch_thread_ptr = NULL;
 static int shutdown = 0;
 static const int notify_mask = IN_CREATE | IN_CLOSE_WRITE | IN_DELETE | IN_MOVE;
 
-static const char* root = ""; //TODO временое решение
-static const char* ext_list = "mp3,flac,ape,m4a,wav"; //TODO временое решение
+static char* root = NULL;
+static const char* ext_list = "mp3,flac,ape,m4a,wav,cue";
+static char* pl_name = NULL;
 
 int file_callback(const char *filepath, const struct stat *info,
                   int typeflag, struct FTW *pathinfo){
@@ -104,10 +106,72 @@ void free_wd(gpointer data){
     free(data);
 }
 
+static int read_conf(const char* path){
+
+    FILE* file = fopen(path, "rt");
+
+    if(file == NULL){
+        return 0;
+    }
+
+    fseek(file, 0, SEEK_END);
+    int l = ftell(file);
+    char *data = malloc(l);
+    if(data == NULL){
+        fclose(file);
+        return 0;
+    }
+    fseek(file, 0, SEEK_SET);
+    l = (int) fread(data, sizeof(char), l, file);
+    fclose(file);
+
+    const cJSON* conf_json = cJSON_Parse(data);
+    if(conf_json == NULL){
+        return 0;
+    }
+
+    cJSON* folder_json = cJSON_GetObjectItem(conf_json,"folder");
+
+    if(folder_json == NULL){
+        return 0;
+    }
+
+    char* folder = cJSON_GetStringValue(folder_json);
+
+    if(folder_json == NULL){
+        return 0;
+    }
+    root = folder;
+
+    cJSON* pl_name_json = cJSON_GetObjectItem(conf_json,"pl name");
+
+    if(pl_name_json == NULL){
+        char* folder_name_tmp = strdup(folder);
+
+        pl_name = basename(folder_name_tmp);
+    }else{
+        pl_name = cJSON_GetStringValue(pl_name_json);
+    }
+
+    return 1;
+}
+
 static int start(){
     //get path to database file
     const char* db_dir = deadbeef->get_system_dir(DDB_SYS_DIR_CONFIG);
     char* db_file = full_path(db_dir,"data.db");
+
+    char* conf_file = full_path(db_dir,"watch_dir_conf.json");
+    printf("%s\n", conf_file);
+
+    int conf_read_result = read_conf(conf_file);
+
+    if(!conf_read_result){
+        free(db_file);
+        free(conf_file);
+        return 1;
+    }
+
 #ifdef DEGUG
     printf("data_base file: %s\n",db_file);
 #endif
@@ -152,6 +216,7 @@ static int start(){
     nftw(root, file_callback, USE_FDS, FTW_PHYS);
 
     free(db_file);
+    free(conf_file);
     return 0;
 }
 
@@ -437,14 +502,22 @@ static void watch_thread(ddb_playlist_t* pl){
 }
 
 static int connect(){
-    ddb_playlist_t* pl = deadbeef->plt_find_by_name("test");
+    if(root == NULL){
+        return 1;
+    }
+
+    ddb_playlist_t *pl = deadbeef->plt_find_by_name(pl_name);
+
     if(pl == NULL){
-        printf("play list not found\n");
-        return 0;
+        pl = deadbeef->plt_append(pl_name);
     }
 #ifdef DEBUG
     printf("play list found\n");
 #endif
+
+    if(pl == NULL){
+        return 1;
+    }
 
     deadbeef->plt_add_files_begin(pl,1);
 
@@ -468,10 +541,14 @@ static int connect(){
 static int stop(){
 
     shutdown = TRUE;
-    deadbeef->thread_join(watch_thread_ptr);
+    if(watch_thread_ptr)
+        deadbeef->thread_join(watch_thread_ptr);
 
-    g_hash_table_destroy(wd_table);
-    sqlite3_close(db);
+    if(wd_table)
+        g_hash_table_destroy(wd_table);
+
+    if (db)
+        sqlite3_close(db);
     return 0;
 }
 
@@ -483,7 +560,7 @@ static DB_misc_t plugin = {
                 .name = "watch dir",
                 .descr = "auto refresh play list",
                 .copyright = "Murloc Knight",
-                .website = "https://github.com/KnightMurloc/DeadBeef-X11-Overlay-Plugin-",
+                .website = "https://github.com/KnightMurloc/DeadBeef-watch-dir-plugin",
                 .command = NULL,
                 .start = start,
                 .stop = stop,
