@@ -3,6 +3,7 @@
 //
 
 //need for nftw
+//#define DEBUG
 #define _LARGEFILE64_SOURCE
 #define _FILE_OFFSET_BITS 64
 #define _XOPEN_SOURCE 700
@@ -43,12 +44,16 @@ static const int notify_mask = IN_CREATE | IN_CLOSE_WRITE | IN_DELETE | IN_MOVE;
 static char* root = NULL;
 static const char* ext_list = "mp3,flac,ape,m4a,wav,cue";
 static char* pl_name = NULL;
+static FILE* log_file = NULL;
+
+//#define log(x,...) fprintf(log_file,x,...)
+
 
 static char* escaping(const char* str){
 
-    int str_len = strlen(str);
+    size_t str_len = strlen(str);
 
-    int quotes = 0;
+    size_t quotes = 0;
     for (int i = 0; i < str_len; ++i) {
         if(str[i] == '\''){
             quotes++;
@@ -117,7 +122,7 @@ int file_callback(const char *filepath, const struct stat *info,
             fprintf(stderr, "SQL error2: %s\n", err_msg);
         }
 
-        printf("%s\n", filepath);
+        //printf("%s\n", filepath);
 
         free(sql);
         free(dir_name_tmp);
@@ -129,7 +134,7 @@ int file_callback(const char *filepath, const struct stat *info,
 
 static ddb_playlist_t* find_playlist(const char* find_title){
     int pl_count = deadbeef->plt_get_count();
-    printf("pl count: %d\n", pl_count);
+    fprintf(log_file,"pl count: %d\n", pl_count);
 
     for(int i = 0; i < pl_count; i++){
         ddb_playlist_t* pl = deadbeef->plt_get_for_idx(i);
@@ -146,7 +151,7 @@ static ddb_playlist_t* find_playlist(const char* find_title){
 
 void free_wd(gpointer data){
 #ifdef DEGUG
-    printf("wd free\n");
+    fprintf(log_file,"wd free\n");
 #endif
     inotify_rm_watch(in_fd,  *((int*) data));
     free(data);
@@ -203,12 +208,13 @@ static int read_conf(const char* path){
 }
 
 static int start(){
+	
     //get path to database file
     const char* db_dir = deadbeef->get_system_dir(DDB_SYS_DIR_CONFIG);
     char* db_file = full_path(db_dir,"data.db");
-
+	log_file = fopen(full_path(db_dir,"log.txt"),"wt");
     char* conf_file = full_path(db_dir,"watch_dir_conf.json");
-    printf("%s\n", conf_file);
+    fprintf(log_file,"%s\n", conf_file);
 
     int conf_read_result = read_conf(conf_file);
 
@@ -219,22 +225,22 @@ static int start(){
     }
 
 #ifdef DEGUG
-    printf("data_base file: %s\n",db_file);
+    fprintf(log_file,"data_base file: %s\n",db_file);
 #endif
     int init_needed = access(db_file,R_OK);
 #ifdef DEGUG
-    printf("init_needed: %d\n", init_needed);
+    fprintf(log_file,"init_needed: %d\n", init_needed);
 #endif
     int rc = sqlite3_open(db_file, &db);
 
     if (rc != SQLITE_OK) {
-        printf("Cannot open database: %s\n", sqlite3_errmsg(db));
+        fprintf(log_file,"Cannot open database: %s\n", sqlite3_errmsg(db));
         sqlite3_close(db);
         return 1;
     }
 
     if(init_needed == -1){
-        printf("init bd\n");
+        fprintf(log_file,"init bd\n");
         sqlite3_exec(db,"CREATE TABLE \"files\" (\n"
                         "\t\"path\"\tTEXT NOT NULL CHECK(path <> \"\")\n"
                         ");",NULL,NULL,&err_msg);
@@ -244,7 +250,7 @@ static int start(){
     }
 #ifdef DEGUG
     else{
-        printf("work with exist db\n");
+        fprintf(log_file,"work with exist db\n");
     }
 #endif
     sqlite3_exec(db, "CREATE temporary TABLE \"files_tmp\" (\n"
@@ -284,6 +290,13 @@ static int add_callback(void *pl_raw, int argc, char **argv, char **azColName){
             free(path_esq);
         }
 
+	fprintf(log_file,"%s\n", path);
+	if(deadbeef->plt_add_file2(1,pl,path,NULL,NULL)){
+	    fprintf(log_file,"add failed: %s\n",path);
+	    return 0;
+	}
+
+		fprintf(log_file, "add_callback, write to bd: %s\n", sql);
         int rc = sqlite3_exec(db, sql, 0, 0, &err_msg);
 
         if (rc != SQLITE_OK ) {
@@ -291,9 +304,9 @@ static int add_callback(void *pl_raw, int argc, char **argv, char **azColName){
         }
 
 
-        printf("%s\n", path);
-        deadbeef->plt_add_file2(1,pl,path,NULL,NULL);
-
+        
+        //deadbeef->plt_add_file2(1,pl,path,NULL,NULL);
+		fprintf(log_file,"add: %s\n",path);
         free(sql);
     }
     return 0;
@@ -324,14 +337,14 @@ static int remove_callback(void *pl, int argc, char **argv, char **azColName){
     if(argc == 1){
         const char* sql_form = "delete from files where path = '%s';";
         const char* path = argv[0];
-
+		
         char* sql = malloc(strlen(sql_form) + strlen(path) + 2);
         sprintf(sql,sql_form,path);
 
         int rc = sqlite3_exec(db, sql, 0, 0, &err_msg);
 
         if (rc != SQLITE_OK ) {
-            fprintf(stderr, "SQL error: %s\n", err_msg);
+            fprintf(log_file, "SQL error: %s\n", err_msg);
         }
 
         ddb_playItem_t* playItem = find_by_path(pl,path);
@@ -347,7 +360,7 @@ static int remove_callback(void *pl, int argc, char **argv, char **azColName){
 
         deadbeef->pl_item_unref(playItem);
         deadbeef->pl_unlock();
-
+		fprintf(log_file,"removed: %s\n", path);
         free(sql);
     }
     return 0;
@@ -366,13 +379,14 @@ void add_dir(struct inotify_event *event){
     *wd = inotify_add_watch(in_fd, path, notify_mask);
     if (*wd == -1)
     {
-        printf("Couldn't add watch to %s\n", path);
+        fprintf(log_file,"Couldn't add watch to %s\n", path);
         return;
     }
     g_hash_table_insert(wd_table,wd,path);
 }
 
 void add_file(struct inotify_event *event, ddb_playlist_t* pl){
+	fprintf(log_file,"file created: %s\n",event->name);
     char* basename_tmp = strdup(event->name);
 
     char* file = basename(basename_tmp);
@@ -396,12 +410,24 @@ void file_close(struct inotify_event *event, ddb_playlist_t* pl){
     char* path = malloc(strlen(parent_name) + 1 + strlen(event->name) + 2);
     sprintf(path,"%s/%s",parent_name,event->name);
     if(g_hash_table_contains(wait_table,path)){
+
+	deadbeef->pl_lock();
+	fprintf(log_file,"%s\n", path);
+	if(deadbeef->plt_add_file2(1,pl,path,NULL,NULL)){
+	     fprintf(log_file,"add failed: %s\n",path);
+	     deadbeef->pl_unlock();
+	    return;
+	}
+         
+        deadbeef->pl_unlock();
+
+
 #ifdef DEBUG
-        printf("file write end %s\n", path);
+        fprintf(log_file,"file write end %s\n", path);
 #endif
         g_hash_table_remove(wait_table,path);
 
-        const char* sql_form = "insert into files(path) values('%s'));";
+        const char* sql_form = "insert into files(path) values('%s');";
 
         char* path_esq = escaping(path);
 
@@ -418,17 +444,12 @@ void file_close(struct inotify_event *event, ddb_playlist_t* pl){
         }
 
 
-
+		fprintf(log_file, "file_close, write to bd: %s\n", sql);
         int rc = sqlite3_exec(db, sql, 0, 0, &err_msg);
 
         if (rc != SQLITE_OK ) {
             fprintf(stderr, "SQL error: %s\n", err_msg);
         }
-
-        deadbeef->pl_lock();
-        deadbeef->plt_add_file2(1,pl,path,NULL,NULL); //TODO check if file add failed and not add to DB
-        deadbeef->pl_unlock();
-
         free(path);
         free(sql);
     }
@@ -452,7 +473,7 @@ void remove_file(struct inotify_event *event, ddb_playlist_t* pl){
     }
 
     ddb_playItem_t* playItem = find_by_path(pl,path);
-    printf("found: %p\n", playItem);
+    fprintf(log_file,"found: %p\n", playItem);
     if(playItem == NULL){
         free(sql);
         free(path);
@@ -485,10 +506,12 @@ static void watch_thread(ddb_playlist_t* pl){
     {
         i = 0;
 
+		fflush(log_file);
+		sqlite3_db_cacheflush(db);
         int ret = poll( fds, 1, 10000);
 
         if(ret == -1){
-            printf("error\n");
+            fprintf(log_file,"error\n");
             break;
         }else if(ret == 0){
             continue;
@@ -510,12 +533,12 @@ static void watch_thread(ddb_playlist_t* pl){
                 if (event->mask & IN_CREATE) {
                     if (event->mask & IN_ISDIR) {
 #ifdef DEBUG
-                        printf("The directory %s was Created.\n", event->name);
+                        fprintf(log_file,"The directory %s was Created.\n", event->name);
 #endif
                         add_dir(event);
                     }else{
 #ifdef DEBUG
-                        printf("The file %s was Created with WD %d - cookie %d\n", event->name, event->wd,
+                        fprintf(log_file,"The file %s was Created with WD %d - cookie %d\n", event->name, event->wd,
                                event->cookie);
 #endif
                         add_file(event,pl);
@@ -524,11 +547,11 @@ static void watch_thread(ddb_playlist_t* pl){
                     if (event->mask & IN_ISDIR) {
                         //TODO удалять wd у далёной дериктории
 #ifdef DEBUG
-                        printf("STAB The directory %s was deleted.\n", event->name);
+                        fprintf(log_file,"STAB The directory %s was deleted.\n", event->name);
 #endif
                     }else {
 #ifdef DEBUG
-                        printf("The file %s was deleted with WD %d - cookie %d\n", event->name, event->wd,
+                        fprintf(log_file,"The file %s was deleted with WD %d - cookie %d\n", event->name, event->wd,
                                event->cookie);
 #endif
                         remove_file(event,pl);
@@ -537,11 +560,11 @@ static void watch_thread(ddb_playlist_t* pl){
                     if (event->mask & IN_ISDIR) {
                         //TODO удалять wd у далёной дериктории
 #ifdef DEBUG
-                        printf("STAB The directory %s was deleted.\n", event->name);
+                        fprintf(log_file,"STAB The directory %s was deleted.\n", event->name);
 #endif
                     }else {
 #ifdef DEBUG
-                        printf("The file %s was deleted with WD %d - cookie %d\n", event->name, event->wd,
+                        fprintf(log_file,"The file %s was deleted with WD %d - cookie %d\n", event->name, event->wd,
                                event->cookie);
 #endif
                         remove_file(event,pl);
@@ -549,12 +572,12 @@ static void watch_thread(ddb_playlist_t* pl){
                 }else if(event->mask & IN_MOVED_TO){
                     if (event->mask & IN_ISDIR) {
 #ifdef DEBUG
-                        printf("The directory %s was Moved.\n", event->name);
+                        fprintf(log_file,"The directory %s was Moved.\n", event->name);
 #endif
                         add_dir(event);
                     }else{
 #ifdef DEBUG
-                        printf("The file %s was Created with WD %d - cookie %d\n", event->name, event->wd,
+                        fprintf(log_file,"The file %s was Created with WD %d - cookie %d\n", event->name, event->wd,
                                event->cookie);
 #endif
                         add_file(event,pl);
@@ -582,7 +605,7 @@ static int connect(){
         pl = deadbeef->plt_append(pl_name);
     }
 #ifdef DEBUG
-    printf("play list found\n");
+    fprintf(log_file,"play list found\n");
 #endif
 
     if(pl == NULL){
@@ -590,26 +613,29 @@ static int connect(){
     }
 
     deadbeef->plt_add_files_begin(pl,1);
-
+	fprintf(log_file,"новые файлы\n");
     //find new files
     sqlite3_exec(db,"SELECT path FROM files\n"
                     "    EXCEPT\n"
                     "    SELECT path FROM files_tmp;",remove_callback,pl,&err_msg);
+	fprintf(log_file,"удалёные файлы\n");
     //find deleted files
     sqlite3_exec(db,"SELECT path FROM files_tmp\n"
                     "    EXCEPT\n"
                     "    SELECT path FROM files;",add_callback,pl,&err_msg);
-
+	fflush(log_file);
     deadbeef->plt_add_files_end(pl,1);
     deadbeef->plt_modified(pl);
 
     watch_thread_ptr = deadbeef->thread_start((void (*)(void *)) watch_thread, pl);
 
+    sqlite3_exec(db,"drop table files_tmp;",NULL,NULL,&err_msg);
+
     return 0;
 }
 
 static int stop(){
-
+	fclose(log_file);
     shutdown = TRUE;
     if(watch_thread_ptr)
         deadbeef->thread_join(watch_thread_ptr);
